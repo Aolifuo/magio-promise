@@ -44,6 +44,8 @@ error 2022-11-30 19:10:04 f:examples/promise.cpp l:24 id:140420710377216 somethi
 
 ### Sample code 2
 
+Promise all and race
+
 ```cpp
 void promise_all_and_race() {
     StaticThreadPool pool(8);
@@ -95,6 +97,8 @@ info 2022-11-30 19:10:08 f:examples/promise.cpp l:53 id:140420735555328 all task
 
 ### Sample code 3
 
+timer
+
 ```cpp
 void promise_timer() {
     StaticThreadPool pool(8);
@@ -102,6 +106,8 @@ void promise_timer() {
     sleep_for(&pool, 3s)->then([] {
         M_INFO("{}", "waker after 3s");
     });
+
+    // sleep_until()
 
     pool.start();
     pool.wait_for(3s);
