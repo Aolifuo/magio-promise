@@ -84,6 +84,8 @@ void promise_all_and_race() {
 }
 ```
 
+output
+
 ```shell
 info 2022-11-30 19:10:06 f:examples/promise.cpp l:42 id:140420685199104 task two completed
 info 2022-11-30 19:10:07 f:examples/promise.cpp l:37 id:140420676806400 task one completed
@@ -105,6 +107,8 @@ void promise_timer() {
     pool.wait_for(3s);
 }
 ```
+
+output
 
 ```shell
 info 2022-11-30 19:10:16 f:examples/promise.cpp l:97 id:140420701984512 waker after 3s
