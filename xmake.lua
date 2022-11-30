@@ -38,9 +38,20 @@ function build_dev()
     end
 end
 
+function build_examples() 
+    for _, val in ipairs(os.files("examples/**.cpp")) do 
+        target(path.basename(val))
+            set_kind("binary")
+            add_files(val)
+            add_deps("magio-promise")
+            add_packages("fmt")
+    end
+end
+
 use_asan()
 build_magio_promise()
 build_dev()
+build_examples()
 
 --
 -- If you want to known more usage about xmake, please see https://xmake.io

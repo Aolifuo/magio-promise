@@ -3,6 +3,7 @@
 
 #include <mutex>
 #include <memory>
+#include <atomic>
 
 #include "magio/core/traits.h"
 #include "magio/core/executor.h"
@@ -12,48 +13,26 @@
 namespace magio {
 
 class Promise;
-class Resolve;
-class Reject;
 
 using PromisePtr = std::shared_ptr<Promise>;
 
-class Resolve {
+class Defer {
     friend class Promise;
 
-    Resolve(const std::shared_ptr<Promise>& promise)
+    Defer (const std::shared_ptr<Promise>& promise)
         : promise_(promise) { }
 
 public:
-    void operator()() const;
+    void resolve() const;
 
-    auto get_weak() {
-        return promise_;
-    }
+    void reject() const;
 
 private:
-    std::weak_ptr<Promise> promise_;
-};
-
-class Reject {
-    friend class Promise;
-
-    Reject(const std::shared_ptr<Promise>& promise)
-        : promise_(promise) { }
-
-public:
-    void operator()() const;
-
-    auto get_weak() {
-        return promise_;
-    }
-
-private:
-    std::weak_ptr<Promise> promise_;
+    std::shared_ptr<Promise> promise_;
 };
 
 class Promise: public std::enable_shared_from_this<Promise> {
-    friend class Resolve;
-    friend class Reject;
+    friend class Defer;
     
     Promise(Executor* executor)
         : executor_(executor) { }
@@ -65,7 +44,7 @@ public:
         Rejected
     };
 
-    static PromisePtr spawn(Executor* executor, std::function<void(Resolve, Reject)>&& fn) {
+    static PromisePtr spawn(Executor* executor, std::function<void(Defer)>&& fn) {
         MAGIO_NEW_PROMISE;
         std::shared_ptr<Promise> ptr(new Promise(executor), 
             [](Promise* p) {
@@ -74,124 +53,184 @@ public:
             });
 
         executor->post([ptr, fn = std::move(fn)] {
-            fn(Resolve(ptr), Reject(ptr));
+            fn(Defer(ptr));
         });
         return ptr;
     }
 
+    static PromisePtr resolve(Executor* executor) {
+        return spawn(executor, [](Defer defer) {
+            defer.resolve();
+        });
+    }
+
+    static PromisePtr reject(Executor* executor) {
+        return spawn(executor, [](Defer defer) {
+            defer.reject();
+        });
+    }
+
     template<
-        typename OnResolved, 
-        typename OnRejected,
+        typename Range,
         constraint<
-            std::is_invocable_v<OnResolved> &&
-            std::is_invocable_v<OnRejected>
+            IsRange<Range>::value &&
+            std::is_same_v<PromisePtr, typename RangeTraits<Range>::ValueType>
         > = 0
     >
-    PromisePtr then(
-        OnResolved&& on_resolved,
-        OnRejected&& on_rejected
-    ) {
-        auto new_promise = spawn(
+    static PromisePtr all(Executor* executor, const Range& range) {
+        return sync_spawn(executor, [&range](Defer defer) {
+            auto counter = std::make_shared<std::atomic_size_t>(0);
+
+            for (auto& ptr : range) {
+                counter->fetch_add(1);
+                ptr->then([counter, defer] {
+                    counter->fetch_sub(1);
+                    if (counter == 0) {
+                        defer.resolve();
+                    }
+                }, [defer] {
+                    defer.reject();
+                });
+            }
+        });
+    }
+
+    template<
+        typename Range,
+        constraint<
+            IsRange<Range>::value &&
+            std::is_same_v<PromisePtr, typename RangeTraits<Range>::ValueType>
+        > = 0
+    >
+    static PromisePtr race(Executor* executor, const Range& range) {
+        return sync_spawn(executor, [&range](Defer defer) {
+            for (auto& ptr : range) {
+                ptr->then([defer] {
+                    defer.resolve();
+                }, [defer] {
+                    defer.reject();
+                });
+            }
+        });
+    }
+
+    template<typename OnResolved, typename OnRejected>
+    PromisePtr then(OnResolved on_resolved, OnRejected on_rejected) {
+        auto new_promise = sync_spawn(
             executor_, 
             [
                 ptr = shared_from_this(),
-                on_resolved = std::forward<OnResolved>(on_resolved),
-                on_rejected = std::forward<OnRejected>(on_rejected)
-            ] (Resolve resolve, Reject reject) mutable {
-                ptr->resolve_fns_.emplace_back(
-                    [
-                        span_life = resolve.get_weak().lock(),
-                        resolve = std::move(resolve),
-                        on_resolved = std::move(on_resolved)
-                    ]() mutable {
-                        if constexpr(std::is_same_v<PromisePtr, std::invoke_result_t<OnResolved>>) {
-                            auto ptr = on_resolved();
-                            ptr->then([resolve = std::move(resolve)] {
-                                resolve();
-                            });
-                        } else {
-                            on_resolved();
-                            resolve();
-                        }
-                    }
-                );
-
-                ptr->reject_fns_.emplace_back(
-                    [
-                        span_life = reject.get_weak().lock(),
-                        reject = std::move(reject),
-                        on_rejected = std::move(on_rejected)
-                    ]() mutable {
-                        if constexpr(std::is_same_v<PromisePtr, std::invoke_result_t<OnRejected>>) {
-                            auto ptr = on_rejected();
-                            ptr->then([reject = std::move(reject)] {
-                                reject();
-                            });
-                        } else {
-                            on_rejected();
-                            reject();
-                        }
-                    }
-                );
+                on_resolved = std::move(on_resolved),
+                on_rejected = std::move(on_rejected)
+            ] (Defer defer) mutable {
+                std::lock_guard lk(ptr->mutex_);
+                ptr->resolve_fns_.emplace_back(func_impl(defer, std::move(on_resolved), true));
+                ptr->reject_fns_.emplace_back(func_impl(defer, std::move(on_rejected), true));
             }
         );
 
         return new_promise;
     }
 
-    template<
-        typename OnResolved, 
-        constraint<std::is_invocable_v<OnResolved>> = 0
-    >
-    PromisePtr then(OnResolved&& on_resolved) {
-        return then(std::forward<OnResolved>(on_resolved), nullptr);
+    template<typename OnResolved>
+    PromisePtr then(OnResolved on_resolved) {
+        auto new_promise = sync_spawn(
+            executor_, 
+            [
+                ptr = shared_from_this(),
+                on_resolved = std::move(on_resolved)
+            ](Defer defer) mutable {
+                ptr->resolve_fns_.emplace_back(func_impl(defer, std::move(on_resolved), true));
+                ptr->reject_fns_.emplace_back(func_impl(defer, [] {}, false));
+            }
+        );
+
+        return new_promise;
     }
 
-    template<
-        typename OnRejected,
-        constraint<std::is_invocable_v<OnRejected, std::exception_ptr>> = 0
-    >
-    PromisePtr catch_error(OnRejected&& on_rejected);
+    template<typename OnRejected>
+    PromisePtr fail(OnRejected on_rejected) {
+        auto new_promise = sync_spawn(
+            executor_, 
+            [
+                ptr = shared_from_this(),
+                on_rejected = std::move(on_rejected)
+            ](Defer defer) mutable {
+                std::lock_guard lk(ptr->mutex_);
+                ptr->resolve_fns_.emplace_back(func_impl(defer, [] {}, true));
+                ptr->reject_fns_.emplace_back(func_impl(defer, std::move(on_rejected), true));
+            }
+        );
+
+        return new_promise;
+    }
 
     State state() {
         return state_;
     }
 
 private:
-    void resolve() {
-        {
-            std::lock_guard lk(mutex_);
-            if (state_ != Pending) {
-                return;
+    static PromisePtr sync_spawn(Executor* executor, std::function<void(Defer)>&& fn) {
+        MAGIO_NEW_PROMISE;
+        std::shared_ptr<Promise> ptr(new Promise(executor), 
+            [](Promise* p) {
+                MAGIO_DESTROY_PROMISE;
+                delete p;
+            });
+
+        fn(Defer(ptr));
+        return ptr;
+    }
+
+    template<typename Fn>
+    static auto func_impl(const Defer& defer, Fn&& fn, bool flag) {
+        return [
+            defer,
+            fn = std::forward<Fn>(fn),
+            flag
+        ]() mutable {
+            if constexpr(std::is_same_v<PromisePtr, std::invoke_result_t<std::decay_t<Fn>>>) {
+                auto ptr = fn();
+                ptr->then(
+                    [defer] {
+                        defer.resolve();
+                    },
+                    [defer] {
+                        defer.reject();
+                    });
+            } else {
+                fn();
+                if (flag) {
+                    defer.resolve();
+                } else {
+                    defer.reject();
+                }
             }
-            state_ = Resolved;
+        };
+    }
+
+    void resolve_impl() {
+        std::lock_guard lk(mutex_);
+        if (state_ != Pending) {
+            return;
         }
+        state_ = Resolved;
 
         for (auto& fn : resolve_fns_) {
             executor_->post(std::move(fn));
         }
     }
 
-    void reject() {
-        {
-            std::lock_guard lk(mutex_);
-            if (state_ != Pending) {
-                return;
-            }
-            state_ = Rejected;
+    void reject_impl() {
+        std::lock_guard lk(mutex_);
+        if (state_ != Pending) {
+            return;
         }
+        state_ = Rejected;
         
         for (auto& fn : reject_fns_) {
-            if (fn) {
-                executor_->post(std::move(fn));
-            } else {
-                
-            }
+            executor_->post(std::move(fn));
         }
-
-        executor_->post([eptr = eptr_, fn = std::move(handle_except_)] {
-            fn(eptr);
-        });
     }
 
     std::mutex mutex_;
@@ -202,21 +241,34 @@ private:
 
     std::vector<std::function<void()>> resolve_fns_;
     std::vector<std::function<void()>> reject_fns_;
-    std::function<void(std::exception_ptr)> handle_except_;
 };
 
-void Resolve::operator()() const {
-    auto ptr = promise_.lock();
-    if (ptr) {
-        ptr->resolve();
-    }
+void Defer::resolve() const {
+    promise_->resolve_impl();
 }
 
-void Reject::operator()() const {
-    auto ptr = promise_.lock();
-    if (ptr) {
-        ptr->reject();
-    }
+void Defer::reject() const {
+    promise_->reject_impl();
+}
+
+// timer
+
+template<typename Exe, typename Rep, typename Per>
+PromisePtr sleep_for(Exe* exe, const std::chrono::duration<Rep, Per>& dur) {
+    return Promise::spawn(exe, [dur, exe](Defer defer) {
+        exe->expires_after(dur, [defer](bool) {
+            defer.resolve();
+        });
+    });
+}
+
+template<typename Exe>
+PromisePtr sleep_until(Exe* exe, const std::chrono::steady_clock::time_point& tp) {
+    return Promise::spawn(exe, [tp, exe](Defer defer) {
+        exe->expires_after(tp, [defer](bool) {
+            defer.resolve();
+        });
+    });
 }
 
 }
