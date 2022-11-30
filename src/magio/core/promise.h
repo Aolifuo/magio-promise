@@ -85,7 +85,7 @@ public:
                 counter->fetch_add(1);
                 ptr->then([counter, defer] {
                     counter->fetch_sub(1);
-                    if (counter == 0) {
+                    if (*counter == 0) {
                         defer.resolve();
                     }
                 }, [defer] {

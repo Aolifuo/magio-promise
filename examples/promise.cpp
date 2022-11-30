@@ -35,14 +35,17 @@ void promise_all() {
         Promise::spawn(&pool, [](Defer defer) {
             this_thread::sleep_for(2s);
             M_INFO("{}", "task one completed");
+            defer.resolve();
         }),
         Promise::spawn(&pool, [](Defer defer) {
             this_thread::sleep_for(1s);
             M_INFO("{}", "task two completed");
+            defer.resolve();
         }),
         Promise::spawn(&pool, [](Defer defer) {
             this_thread::sleep_for(3s);
             M_INFO("{}", "task three completed");
+            defer.resolve();
         }),
     };
 
@@ -53,7 +56,7 @@ void promise_all() {
     });
 
     pool.start();
-    pool.wait_for(3s);
+    pool.wait_for(4s);
 }
 
 void promise_race() {
@@ -63,14 +66,17 @@ void promise_race() {
         Promise::spawn(&pool, [](Defer defer) {
             this_thread::sleep_for(2s);
             M_INFO("{}", "task one completed");
+            defer.resolve();
         }),
         Promise::spawn(&pool, [](Defer defer) {
             this_thread::sleep_for(1s);
             M_INFO("{}", "task two completed");
+            defer.resolve();
         }),
         Promise::spawn(&pool, [](Defer defer) {
             this_thread::sleep_for(3s);
             M_INFO("{}", "task three completed");
+            defer.resolve();
         }),
     };
 
@@ -81,7 +87,7 @@ void promise_race() {
     });
 
     pool.start();
-    pool.wait_for(3s);
+    pool.wait_for(4s);
 }
 
 void promise_timer() {

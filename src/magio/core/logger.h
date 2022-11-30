@@ -121,7 +121,7 @@ private:
     inline static thread_local detail::FormatBuffer local_fmt;
     
     LogLevel level_ = LogLevel::Debug;
-    int pattern_ = Date | Time | File | Line | ThreadId;
+    int pattern_ = Level | Date | Time | File | Line | ThreadId;
 };
 
 #define M_TRACE(FMT, ...) \
